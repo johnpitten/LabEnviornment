@@ -2,6 +2,7 @@ import time
 import skrf as rf
 import numpy as np
 from typing import Sequence
+from types import MethodType
 import itertools
 import sys
 from skrf.vi.vna import ValuesFormat
@@ -15,14 +16,12 @@ from skrf.vi.validators import (
     IntValidator,
 )
 
-from bcqthub.controllers import HEMTController #This is Jorge's bcqt-hub-revamp
+from bcqthubrevamp.controllers.HEMTController import HEMTController #This is Jorge's bcqt-hub-revamp
 from bcqt_hub.drivers.misc.MiniCircuits.MC_VarAttenuator import MC_VarAttenuator #This is the actual bcqt-hub
 from CryoSwitchController import Cryoswitch
 
-#TODO: fix connection issue when there are no active measurements -- bug in PNA.create_channel(1, "Channel 1")
-#TODO: add setter for arbitrary freq points
 
-#TODO: add programmable attenuators for power setting
+#TODO: add setter for arbitrary freq points
 class EnhancedPNA(PNA):
     _models = {
         "default": {"nports": 2, "unsupported": []},
@@ -33,6 +32,28 @@ class EnhancedPNA(PNA):
     class Channel(PNA.Channel):
         def __init__(self, parent, cnum: int, cname: str):
             super().__init__(parent, cnum, cname)
+
+            if self.parent.ext_attn:
+
+                def setPower(self, P: float):
+                    if P >= -90:
+                        self.parent.setAttn(0)
+                        self.power_level = P
+                    elif P >= -120 and P < -90:
+                        self.parent.setAttn(-P - 90)
+                        self.power_level = -90
+                        print(f'VNA Power: {P} dBm, external attenuation: {-P - 90} dB')
+                    elif P < -120:
+                        raise ValueError('Cannot reach power levels below -120 dBm')
+
+                def getPower(self):
+                    P = self.power_level
+                    a = self.parent.getAttn()
+                    return P - a
+
+                #Bind functions to Channel object
+                self.setPower = MethodType(setPower, self)
+                self.getPower = MethodType(getPower, self)
 
 
 
@@ -56,7 +77,7 @@ class EnhancedPNA(PNA):
             get_cmd = "SOUR<self:cnum>:POW?",
             set_cmd = "SOUR<self:cnum>:POW <arg>",
             doc="""RF Power level in dBm""",
-            validator = IntValidator(-90, 0),
+            validator = FloatValidator(-90, 0),
         )
 
         rfpower = PNA.command(
@@ -144,22 +165,7 @@ class EnhancedPNA(PNA):
 
             return ntwk
 
-        if self.parent.ext_attenuation:
-            def setPower(self, P:float):
-                if P >= -90:
-                    self.parent.SetAttn(0)
-                    self.power_level = P
-                elif P >= -120 and P < -90:
-                    self.parent.SetAttn(-P-90)
-                    self.power_level = -90
-                    print(f'VNA Power: {P} dBm, external attenuation: {-P-90} dB')
-                elif P < -120:
-                    raise ValueError('Cannot reach power levels below -120 dBm')
 
-            def getPower(self):
-                P = self.power_level
-                a = self.parent.GetAttn()
-                return P-a
 
 
         '''
@@ -171,7 +177,7 @@ class EnhancedPNA(PNA):
         '''
 
     def __init__(self, address: str, backend: str = "@py", ext_attenuators = False) -> None:
-        #How can the attenuators variable be passed to the Channel subclass' __init__ function?
+        self.ext_attn = ext_attenuators
         super(PNA, self).__init__(address, backend)
         #this references the initialization of skrf's VNA class since we need to modify the PNA __init__ function
         #to fix connection issues when there is no active measurement channel
@@ -183,21 +189,22 @@ class EnhancedPNA(PNA):
         #there being no active measurement channels
 
         #WARNING: the SCPI command CALCulate<cnum>:PARameter:COUNt returns 1 when there are 0 active measurements
+        #To the best of my knowledge, self.create_channel does not send and SCPI commands to the vna,
+        # but self.active_channel does
         self.create_channel(1, "Channel 1")
         #query list of measurements
         ms = self.ch1.measurements
-        print(f'ms: {ms}')
         if ms == []:
             print('WARNING: No currently active measurement channels.')
-            #may need to additionally check for existence of window before creating a new one
             self.write('DISP:WIND ON')
+            self.active_channel = self.ch1
         else:
             self.active_channel = self.ch1
 
         self.model = self.id.split(",")[1]
         if self.model not in self._models:
             print(
-                f"WARNING: This model ({self.model}) has not been tested with "
+                f"WARNI NG: This model ({self.model}) has not been tested with "
                 "scikit-rf. By default, all features are turned on but older "
                 "instruments might be missing SCPI support for some commands "
                 "which will cause errors. Consider submitting an issue on GitHub to "
@@ -208,81 +215,109 @@ class EnhancedPNA(PNA):
 
         #connect to external attenuators if Serial Numbers given
         #format is {'Port 1': '12345', 'Port 2': '67890'}
-        if attenuators:
+        if ext_attenuators:
             print('Connecting to programmable attenuators')
+
 
             self.att1 = MC_VarAttenuator(device_address = "192.168.0.113")
             self.att2 = MC_VarAttenuator(device_address = "192.168.0.114")
 
-            #these have methods att.Set_Attenuation(atten: float), and att.Get_Attenuation()
-            #must define pna.setAttn(), pna.getAttn(), pna.Channel.setPower()
+
             def getAttn(self):
-                atten1 = float(att1.Get_Attenuation()[1])
-                atten2 = float(att2.Get_Attenuation()[1])
+                atten1 = float(self.att1.Get_Attenuation()[1])
+                atten2 = float(self.att2.Get_Attenuation()[1])
 
                 if atten1 != atten2:
                     raise ValueError('dissimilar attenuation values')
                 else:
                     return atten1
 
-            def setAttn(a: float):
+            def setAttn(self, a: float):
                 if a < 0 or a > 30:
                     raise ValueError('attenuation must be between 0 and 30 dB')
                 else:
-                    att1.Set_Attenuation(a)
-                    att2.Set_Attenuation(a)
-
+                    self.att1.Set_Attenuation(a)
+                    self.att2.Set_Attenuation(a)
+            #Bind these functions to the pna object i.e self
+            #I'm not actually sure why this works
+            self.getAttn = MethodType(getAttn, self)
+            self.setAttn = MethodType(setAttn, self)
             #set attenuation to 0 upon initialization
-            self.SetAttn(0)
-            self.ext_attenuation = ext_attenuators
-
-            '''
-            import clr  # pythonnet (do not pip install clr, pip install pythonnet instead)
-            clr.AddReference('mcl_RUDAT_NET45')  # Reference the DLL
-            #after downloading the .ddl file from minicircuits the .zip file has to be unblocked
-            #if this option does not appear in general properties of the .zip file then you must
-            #do so in Windows Powershell (run as Administrator)
-            #the command is: unblock-file -path "string to path"
-            # the .zip extention shuld be included
-
-            from mcl_RUDAT_NET45 import USB_RUDAT
-            #need to think about how to incorporate attenuators
-            self.att1 = USB_RUDAT()
-            self.att2 = USB_RUDAT()
-
-            Status1 = self.att1.Connect(SN = str(attenuators['Port 1']))
-            Status2 = self.att2.Connect(SN = str(attenuators['Port 2']))
-            #TODO: actually check the status of these connections
-            #set attenuation to 0 on both attenuators
-            #define coordinated set & get attenuation functions
+            self.setAttn(0)
 
         else:
             print('No external attenuators')
-            '''
+            self.ext_attn = False
+
+    #active_channel had to be overwritten to handle initialization without active measurements
+    @property
+    def active_channel(self) -> Channel | None:
+        num = int(self.query("SYST:ACT:CHAN?"))
+        return getattr(self, f"ch{num}", None)
+
+
+    @active_channel.setter
+    def active_channel(self, ch: Channel) -> None:
+        if self.active_channel is None:
+            #create a dummy measurement
+            name = 'DUMMY_S11'
+            parameter = 'S11'
+            #hard-coded the create_measurement method without reference to ch.cnum, because the measurement
+            #needs to be created before ch.cnum exists
+            #SCPI supports witholding cnum, but self.create_measurement does not
+            self.write(f"CALC:PAR:EXT '{name}',{parameter}")
+            # Not all instruments support DISP:WIND:TRAC:NEXT
+            traces = self.query("DISP:WIND:CAT?").replace('"', "")
+            traces = [int(tr) for tr in traces.split(",")] if traces != "EMPTY" else [0]
+            next_tr = traces[-1] + 1
+            self.write(f"DISP:WIND:TRAC{next_tr}:FEED '{name}'")
+
+            msmnt = ch.measurement_numbers[0]
+            print(msmnt)
+            self.write(f"CALC{ch.cnum}:PAR:MNUM {msmnt}")#this sets the active measurement using the trace number
+            #no command to activate new channel
+            self.delete_all_measurements()
+            return
+
+        elif self.active_channel.cnum is ch.cnum:
+            return
+
+        msmnt = ch.measurement_numbers[0]
+        self.write(f"CALC{ch.cnum}:PAR:MNUM {msmnt}")
+
+
+
 
 
 
 #change inputs so I don't have to deal with cfg dictionary
 class LabSwitch(Cryoswitch):
     def __init__(self, switch_debug=False, COM_port='', switch_IP=None, SN=None, override_abspath=False,
-                 configs = dict(), HEMTctrl_debug=False, **kwargs):
+                 HEMTctrl_IP = '', HEMTctrl_debug=False, **kwargs):
         #May want to have self.switch = Cryoswitch(...) and self.HEMTctrl = HEMTController(...) instead
-        Cryoswitch.__init__(self, debug=switch_debug, COM_port=COM_port, IP=switch_IP, SN=SN,
+        Cryoswitch.__init__(debug=switch_debug, COM_port=COM_port, IP=switch_IP, SN=SN,
                             override_abspath=override_abspath)
+        configs = {'address': HEMTctrl_IP}
         self.ctrl = HEMTController(configs = configs, debug=HEMTctrl_debug, **kwargs)
         self.ctrl.gate_value = 1.1
         self.ctrl.drain_value = 0.7
-        self.ctrl.step = 0.05
-        self.ctrl.delay = 0.2
+        self.ctrl.step = 0.025
+        self.ctrl.delay = 0.1
         self.start()#Cryoswitch method
         self.set_output_voltage(5.5)
         self.devices = dict()
-        #keep track of active switch channels?
+        #TODO: keep track of active switch channels after putting switch into known initial state (safely)
+        def getVoltage(self, channel):
+            return self.psu.get_channel_voltage(self.gate_channel)
+        self.ctrl.getVoltage = MethodType(getVoltage, self.ctrl)
 
+
+
+    #TODO: turn_off & turn_on take arrays for each voltage step now
     def safeConnect(self, channel: int | str, safe_mode = True):
         #check channel for type (int or string) if string then pass to self.devices dict to get the channel number
         if type(channel) == str:
-            channel_number = devices[channel]
+            channel_number = self.devices[channel]
         elif type(channel) == int:
             channel_number = channel
 
@@ -301,12 +336,15 @@ class LabSwitch(Cryoswitch):
         time.sleep(1)
         self.disconnect_all(port='B')
         time.sleep(1)
-        self.connect(port='A', contact=channel_number)
+        self.connect(port='A', contact = channel_number)
         time.sleep(1)
-        self.connect(port='B', contact=channel_number)
+        self.connect(port='B', contact = channel_number)
+        #TODO: use np.arange(start, stop, step) to generate arrays with appropriate step values
         self.ctrl.turn_on(gate_stop=self.ctrl.gate_value, drain_stop=self.ctrl.drain_value,
                            step=self.ctrl.step, delay=self.ctrl.delay)
         display_string = f'Cryoswitch is now on channel {channel_number}'
         if type(channel) == str:
             display_string = display_string + f' (DUT: {channel})'
         print(display_string)
+
+

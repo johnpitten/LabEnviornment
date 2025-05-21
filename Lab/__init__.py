@@ -1,1 +1,1 @@
-import Lab
+from .Lab import EnhancedPNA, LabSwitch
