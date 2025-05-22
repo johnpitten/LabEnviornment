@@ -290,40 +290,61 @@ class EnhancedPNA(PNA):
 
 
 
-#change inputs so I don't have to deal with cfg dictionary
+#TODO: keep track of active switch channels after putting switch into known initial state (safely)
 class LabSwitch(Cryoswitch):
     def __init__(self, switch_debug=False, COM_port='', switch_IP=None, SN=None, override_abspath=False,
-                 HEMTctrl_IP = '', HEMTctrl_debug=False, **kwargs):
+                 HEMTctrl_address = '', HEMTctrl_debug=False, **kwargs):
         #May want to have self.switch = Cryoswitch(...) and self.HEMTctrl = HEMTController(...) instead
-        Cryoswitch.__init__(debug=switch_debug, COM_port=COM_port, IP=switch_IP, SN=SN,
+        Cryoswitch.__init__(self, debug=switch_debug, COM_port=COM_port, IP=switch_IP, SN=SN,
                             override_abspath=override_abspath)
-        configs = {'address': HEMTctrl_IP}
+        configs = {'address': HEMTctrl_address}
         self.ctrl = HEMTController(configs = configs, debug=HEMTctrl_debug, **kwargs)
-        self.ctrl.gate_value = 1.1
-        self.ctrl.drain_value = 0.7
-        self.ctrl.step = 0.025
-        self.ctrl.delay = 0.1
+
+        self.ctrl.gate_setpoint = 1.1
+        self.ctrl.drain_setpoint = 0.7
+        self.ctrl.step = 0.05
+        self.ctrl.delay = 0.01
+
+        # np.arange excludes the endpoint
+        self.ctrl.gate_vs = np.arange(0, self.ctrl.gate_setpoint+0.5*self.ctrl.step, self.ctrl.step)
+        self.ctrl.drain_vs = np.arange(0, self.ctrl.drain_setpoint+0.5*self.ctrl.step, self.ctrl.step)
+
+        print(self.ctrl.gate_vs)
+        print(self.ctrl.drain_vs)
+
         self.start()#Cryoswitch method
         self.set_output_voltage(5.5)
         self.devices = dict()
-        #TODO: keep track of active switch channels after putting switch into known initial state (safely)
+
         def getVoltage(self, channel):
-            return self.psu.get_channel_voltage(self.gate_channel)
+            return self.psu.get_channel_voltage(channel)
         self.ctrl.getVoltage = MethodType(getVoltage, self.ctrl)
 
 
 
-    #TODO: turn_off & turn_on take arrays for each voltage step now
+
     def safeConnect(self, channel: int | str, safe_mode = True):
-        #check channel for type (int or string) if string then pass to self.devices dict to get the channel number
+        #check channel argument for type (int or string) if string then pass to self.devices dict to get the channel number
         if type(channel) == str:
             channel_number = self.devices[channel]
-        elif type(channel) == int:
+        elif type(channel) == int and 1 <= channel <= 6:
             channel_number = channel
+        else:
+            raise ValueError('unexpected input for switch connection')
 
-        #Ramp Down the HEMT power supply
-        self.ctrl.turn_off(step=self.ctrl.step, delay=self.ctrl.delay)
-        #check that the HEMTs are off
+        #check HEMT output status, ramp down if on
+        gate_status = self.ctrl.psu.get_output(self.ctrl.gate_channel)
+        drain_status = self.ctrl.psu.get_output(self.ctrl.drain_channel)
+        if gate_status == True and drain_status == True:
+            print('HEMTs are on, ramping voltage biases down')
+            self.ctrl.turn_off(step=self.ctrl.step, delay=self.ctrl.delay)
+        elif gate_status == False and drain_status == False:
+            print('HEMTs are already off')
+        else:
+            raise ValueError('Unexpected HEMT bias')
+
+
+        #user check that the HEMTs are off
         while safe_mode:
             user_check = input('Check that the HEMTs are powered off, enter y/n:')
             if user_check == 'n':
@@ -332,6 +353,9 @@ class LabSwitch(Cryoswitch):
                 print('enter either \'y\' or \'n\'')
             elif user_check == 'y':
                 break
+
+
+        #operate the switch
         self.disconnect_all(port='A')
         time.sleep(1)
         self.disconnect_all(port='B')
@@ -339,9 +363,13 @@ class LabSwitch(Cryoswitch):
         self.connect(port='A', contact = channel_number)
         time.sleep(1)
         self.connect(port='B', contact = channel_number)
-        #TODO: use np.arange(start, stop, step) to generate arrays with appropriate step values
-        self.ctrl.turn_on(gate_stop=self.ctrl.gate_value, drain_stop=self.ctrl.drain_value,
-                           step=self.ctrl.step, delay=self.ctrl.delay)
+
+
+        #Ramp HEMT bias back on
+        self.ctrl.turn_on(gate_voltages=self.ctrl.gate_vs, drain_voltages=self.ctrl.drain_vs,
+                            delay=self.ctrl.delay)
+
+        #print current
         display_string = f'Cryoswitch is now on channel {channel_number}'
         if type(channel) == str:
             display_string = display_string + f' (DUT: {channel})'
