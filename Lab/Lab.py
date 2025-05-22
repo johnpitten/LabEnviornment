@@ -19,6 +19,7 @@ from skrf.vi.validators import (
 from bcqthubrevamp.controllers.HEMTController import HEMTController #This is Jorge's bcqt-hub-revamp
 from bcqt_hub.drivers.misc.MiniCircuits.MC_VarAttenuator import MC_VarAttenuator #This is the actual bcqt-hub
 from CryoSwitchController import Cryoswitch
+from InstrumentAddresses import attenuator1_IP, attenuator2_IP
 
 
 #TODO: add setter for arbitrary freq points
@@ -219,8 +220,8 @@ class EnhancedPNA(PNA):
             print('Connecting to programmable attenuators')
 
 
-            self.att1 = MC_VarAttenuator(device_address = "192.168.0.113")
-            self.att2 = MC_VarAttenuator(device_address = "192.168.0.114")
+            self.att1 = MC_VarAttenuator(device_address = attenuator1_IP)
+            self.att2 = MC_VarAttenuator(device_address = attenuator2_IP)
 
 
             def getAttn(self):
