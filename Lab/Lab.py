@@ -17,7 +17,7 @@ from skrf.vi.validators import (
 )
 
 from bcqthubrevamp.controllers.HEMTController import HEMTController #This is Jorge's bcqt-hub-revamp
-from bcqt_hub.drivers.misc.MiniCircuits.MC_VarAttenuator import MC_VarAttenuator #This is the actual bcqt-hub
+from bcqthub.drivers.misc.MiniCircuits.MC_VarAttenuator import MC_VarAttenuator #This is the actual bcqt-hub
 from CryoSwitchController import Cryoswitch
 from InstrumentAddresses import attenuator1_IP, attenuator2_IP
 
@@ -28,6 +28,8 @@ class EnhancedPNA(PNA):
         "default": {"nports": 2, "unsupported": []},
         "E8362C": {"nports": 2, "unsupported": ["nports", "freq_step", "fast_sweep"]},
         "N5227B": {"nports": 4, "unsupported": []},
+        'N5231B': {"nports": 2, "unsupported": []}, #not added by scikit-rf
+
     }
 
     class Channel(PNA.Channel):
@@ -205,7 +207,7 @@ class EnhancedPNA(PNA):
         self.model = self.id.split(",")[1]
         if self.model not in self._models:
             print(
-                f"WARNI NG: This model ({self.model}) has not been tested with "
+                f"WARNING: This model ({self.model}) has not been tested with "
                 "scikit-rf. By default, all features are turned on but older "
                 "instruments might be missing SCPI support for some commands "
                 "which will cause errors. Consider submitting an issue on GitHub to "
@@ -220,8 +222,8 @@ class EnhancedPNA(PNA):
             print('Connecting to programmable attenuators')
 
 
-            self.att1 = MC_VarAttenuator(device_address = attenuator1_IP)
-            self.att2 = MC_VarAttenuator(device_address = attenuator2_IP)
+            self.att1 = MC_VarAttenuator(device_address = attenuator1_IP, debug = False)
+            self.att2 = MC_VarAttenuator(device_address = attenuator2_IP, debug = False)
 
 
             def getAttn(self):
@@ -239,7 +241,7 @@ class EnhancedPNA(PNA):
                 else:
                     self.att1.Set_Attenuation(a)
                     self.att2.Set_Attenuation(a)
-            #Bind these functions to the pna object i.e self
+            #Bind these functions to the pna object i.e. self
             #I'm not actually sure why this works
             self.getAttn = MethodType(getAttn, self)
             self.setAttn = MethodType(setAttn, self)
@@ -265,7 +267,7 @@ class EnhancedPNA(PNA):
             parameter = 'S11'
             #hard-coded the create_measurement method without reference to ch.cnum, because the measurement
             #needs to be created before ch.cnum exists
-            #SCPI supports witholding cnum, but self.create_measurement does not
+            #SCPI supports this, but self.create_measurement does not
             self.write(f"CALC:PAR:EXT '{name}',{parameter}")
             # Not all instruments support DISP:WIND:TRAC:NEXT
             traces = self.query("DISP:WIND:CAT?").replace('"', "")
@@ -275,7 +277,7 @@ class EnhancedPNA(PNA):
 
             msmnt = ch.measurement_numbers[0]
             print(msmnt)
-            self.write(f"CALC{ch.cnum}:PAR:MNUM {msmnt}")#this sets the active measurement using the trace number
+            self.write(f"CALC{ch.cnum}:PAR:MNUM {msmnt}") #this sets the active measurement using the trace number
             #no command to activate new channel
             self.delete_all_measurements()
             return
@@ -292,14 +294,15 @@ class EnhancedPNA(PNA):
 
 
 #TODO: keep track of active switch channels after putting switch into known initial state (safely)
+#TODO: suppress tqdm progress bar
 class LabSwitch(Cryoswitch):
     def __init__(self, switch_debug=False, COM_port='', switch_IP=None, SN=None, override_abspath=False,
-                 HEMTctrl_address = '', HEMTctrl_debug=False, **kwargs):
+                 HEMTctrl_address = '', suppress_logs = True, **kwargs):
         #May want to have self.switch = Cryoswitch(...) and self.HEMTctrl = HEMTController(...) instead
         Cryoswitch.__init__(self, debug=switch_debug, COM_port=COM_port, IP=switch_IP, SN=SN,
                             override_abspath=override_abspath)
         configs = {'address': HEMTctrl_address}
-        self.ctrl = HEMTController(configs = configs, debug=HEMTctrl_debug, **kwargs)
+        self.ctrl = HEMTController(configs = configs, suppress_logs = suppress_logs, **kwargs)
 
         self.ctrl.gate_setpoint = 1.1
         self.ctrl.drain_setpoint = 0.7
@@ -309,9 +312,6 @@ class LabSwitch(Cryoswitch):
         # np.arange excludes the endpoint
         self.ctrl.gate_vs = np.arange(0, self.ctrl.gate_setpoint+0.5*self.ctrl.step, self.ctrl.step)
         self.ctrl.drain_vs = np.arange(0, self.ctrl.drain_setpoint+0.5*self.ctrl.step, self.ctrl.step)
-
-        print(self.ctrl.gate_vs)
-        print(self.ctrl.drain_vs)
 
         self.start()#Cryoswitch method
         self.set_output_voltage(5.5)
@@ -324,7 +324,7 @@ class LabSwitch(Cryoswitch):
 
 
 
-    def safeConnect(self, channel: int | str, safe_mode = True):
+    def safeConnect(self, channel: int | str, safe_mode = False):
         #check channel argument for type (int or string) if string then pass to self.devices dict to get the channel number
         if type(channel) == str:
             channel_number = self.devices[channel]
@@ -370,7 +370,7 @@ class LabSwitch(Cryoswitch):
         self.ctrl.turn_on(gate_voltages=self.ctrl.gate_vs, drain_voltages=self.ctrl.drain_vs,
                             delay=self.ctrl.delay)
 
-        #print current
+        #print current switch channel
         display_string = f'Cryoswitch is now on channel {channel_number}'
         if type(channel) == str:
             display_string = display_string + f' (DUT: {channel})'
